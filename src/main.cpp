@@ -9,26 +9,31 @@
 #include <Firebase_ESP_Client.h>
 // Provide the token generation process info.
 #include <addons/TokenHelper.h>
+#include <addons/RTDBHelper.h>
+#include <ArduinoJson.h>
 
 // Replace with your network credentials
-const char *ssid = "SLT";
+const char *ssid = "Nayaa";
 const char *password = "Lancer2003";
 
 // Insert Firebase project API Key
-#define API_KEY "AIzaSyC-Z0erl0XUtY4jlESjVVgp5nCeVK7upbU"
+#define API_KEY "AIzaSyB95vOBwd0SgZfYNA6gooayvBOGoHbncOM"
 
 // Insert Authorized Email and Corresponding Password
-#define USER_EMAIL "nayantha2003@gmail.com"
+#define USER_EMAIL "nayanthanethsara@gmail.com"
 #define USER_PASSWORD "Lancer2003"
 
 // Insert Firebase storage bucket ID e.g bucket-name.appspot.com
-#define STORAGE_BUCKET_ID "sosamala.appspot.com"
+#define STORAGE_BUCKET_ID "car-parking-system-18171.appspot.com"
 
-// Photo File Name to save in LittleFS
-String FILE_PHOTO_PATH = "/photo";
-String BUCKET_PHOTO = "/data/photo.jpg";
+// Insert Firebase Realtime Database URL
+#define DATABASE_URL "https://car-parking-system-18171-default-rtdb.asia-southeast1.firebasedatabase.app/"
 
-int count = 0;
+// Base path and extension for photo files
+#define BASE_FILE_PHOTO_PATH "/photo"
+#define FILE_EXTENSION ".jpg"
+#define INDEX_FILE_PATH "/photoIndex.txt" // Path to store the photo index
+
 // OV2640 camera module pins (CAMERA_MODEL_AI_THINKER)
 #define PWDN_GPIO_NUM 32
 #define RESET_GPIO_NUM -1
@@ -57,6 +62,39 @@ FirebaseConfig configF;
 void fcsUploadCallback(FCS_UploadStatusInfo info);
 
 bool taskCompleted = false;
+int photoIndex = 1; // Start with photo 1
+
+// Function to save the current photo index to LittleFS
+void savePhotoIndex()
+{
+  File file = LittleFS.open(INDEX_FILE_PATH, FILE_WRITE);
+  if (file)
+  {
+    file.println(photoIndex);
+    file.close();
+    Serial.printf("Photo index %d saved to LittleFS\n", photoIndex);
+  }
+  else
+  {
+    Serial.println("Failed to open index file for writing");
+  }
+}
+
+// Function to load the last saved photo index from LittleFS
+void loadPhotoIndex()
+{
+  File file = LittleFS.open(INDEX_FILE_PATH, FILE_READ);
+  if (file)
+  {
+    photoIndex = file.parseInt();
+    file.close();
+    Serial.printf("Photo index %d loaded from LittleFS\n", photoIndex);
+  }
+  else
+  {
+    Serial.println("No index file found, starting with photoIndex 1");
+  }
+}
 
 // Capture Photo and Save it to LittleFS
 void capturePhotoSaveLittleFS(void)
@@ -64,7 +102,7 @@ void capturePhotoSaveLittleFS(void)
   // Dispose first pictures because of bad quality
   camera_fb_t *fb = NULL;
   // Skip first 3 frames (increase/decrease number as needed).
-  for (int i = 0; i < 10; i++)
+  for (int i = 0; i < 4; i++)
   {
     fb = esp_camera_fb_get();
     esp_camera_fb_return(fb);
@@ -74,7 +112,6 @@ void capturePhotoSaveLittleFS(void)
   // Take a new photo
   fb = NULL;
   fb = esp_camera_fb_get();
-
   if (!fb)
   {
     Serial.println("Camera capture failed");
@@ -82,13 +119,10 @@ void capturePhotoSaveLittleFS(void)
     ESP.restart();
   }
 
-  // Photo file name
-  FILE_PHOTO_PATH = "/photo" + String(count) + ".jpg";
-
-  Serial.printf("Picture file name: %s\n", FILE_PHOTO_PATH);
-  File file = LittleFS.open(FILE_PHOTO_PATH, FILE_WRITE);
-
-  count++;
+  // Generate a new file name
+  String fileName = String(BASE_FILE_PHOTO_PATH) + String(photoIndex) + String(FILE_EXTENSION);
+  Serial.printf("Picture file name: %s\n", fileName.c_str());
+  File file = LittleFS.open(fileName, FILE_WRITE);
 
   // Insert the data in the photo file
   if (!file)
@@ -99,7 +133,7 @@ void capturePhotoSaveLittleFS(void)
   {
     file.write(fb->buf, fb->len); // payload (image), payload length
     Serial.print("The picture has been saved in ");
-    Serial.print(FILE_PHOTO_PATH);
+    Serial.print(fileName);
     Serial.print(" - Size: ");
     Serial.print(fb->len);
     Serial.println(" bytes");
@@ -180,23 +214,55 @@ void initCamera()
   }
 }
 
+// Function to check the camera status from the database
+bool checkCameraStatus()
+{
+  if (Firebase.RTDB.getString(&fbdo, "CameraStatus"))
+  {
+    String status = fbdo.stringData();
+    Serial.print("Camera Status: ");
+    Serial.println(status);
+    return status == "ON";
+  }
+  else
+  {
+    Serial.println(fbdo.errorReason());
+    return false;
+  }
+}
+
+// Function to update the camera status in the database
+void updateCameraStatus(String status)
+{
+  if (Firebase.RTDB.setString(&fbdo, "CameraStatus", status))
+  {
+    Serial.print("Camera Status updated to: ");
+    Serial.println(status);
+  }
+  else
+  {
+    Serial.print("Failed to update camera status: ");
+    Serial.println(fbdo.errorReason());
+  }
+}
+
 void setup()
 {
   // Serial port for debugging purposes
   Serial.begin(115200);
   initWiFi();
   initLittleFS();
+  // Load the photo index from LittleFS
+  loadPhotoIndex();
   // Turn-off the 'brownout detector'
   WRITE_PERI_REG(RTC_CNTL_BROWN_OUT_REG, 0);
   initCamera();
 
-  // Firebase
-  //  Assign the api key
+  // Initialize Firebase
   configF.api_key = API_KEY;
-  // Assign the user sign in credentials
+  configF.database_url = DATABASE_URL;
   auth.user.email = USER_EMAIL;
   auth.user.password = USER_PASSWORD;
-  // Assign the callback function for the long running token generation task
   configF.token_status_callback = tokenStatusCallback; // see addons/TokenHelper.h
 
   Firebase.begin(&configF, &auth);
@@ -216,23 +282,22 @@ void loop()
     taskCompleted = true;
     Serial.print("Uploading picture... ");
 
+    // Generate the file name for the current photo
+    String fileName = String(BASE_FILE_PHOTO_PATH) + String(photoIndex) + String(FILE_EXTENSION);
+
     // MIME type should be valid to avoid the download problem.
     // The file systems for flash and SD/SDMMC can be changed in FirebaseFS.h.
-    BUCKET_PHOTO = "/data/photo" + String(random()) + ".jpg";
-    if (Firebase.Storage.upload(&fbdo, STORAGE_BUCKET_ID, FILE_PHOTO_PATH, mem_storage_type_flash, BUCKET_PHOTO, "image/jpeg", fcsUploadCallback))
+    if (Firebase.Storage.upload(&fbdo, STORAGE_BUCKET_ID /* Firebase Storage bucket id */, fileName.c_str() /* path to local file */, mem_storage_type_flash /* memory storage type, mem_storage_type_flash and mem_storage_type_sd */, ("/data/photo" + String(photoIndex) + String(FILE_EXTENSION)).c_str() /* path of remote file stored in the bucket */, "image/jpeg" /* mime type */, fcsUploadCallback))
     {
       Serial.printf("\nDownload URL: %s\n", fbdo.downloadURL().c_str());
-      count++;
+      photoIndex++;     // Increment the photo index after a successful upload
+      savePhotoIndex(); // Save the new photo index
     }
     else
     {
       Serial.println(fbdo.errorReason());
     }
   }
-
-  delay(10000);
-
-  takeNewPhoto = true;
 }
 
 // The Firebase Storage upload callback function
